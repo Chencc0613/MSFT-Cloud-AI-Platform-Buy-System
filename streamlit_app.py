@@ -118,26 +118,70 @@ def state_pill(state):
 
 
 def clean_for_json(obj):
-    if isinstance(obj, dict):
-        return {str(k): clean_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [clean_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [clean_for_json(v) for v in obj]
+    """Convert nested model output into JSON-safe objects for Streamlit downloads.
+
+    The core model returns pandas DataFrames/Series, Timestamp indexes, numpy scalars,
+    and sometimes NaN/Inf values. json.dumps cannot serialize these directly, so this
+    function recursively normalizes both keys and values.
+    """
+    if obj is None:
+        return None
+
+    # pandas containers first
     if isinstance(obj, pd.DataFrame):
-        return obj.reset_index().to_dict(orient="records")
+        safe_df = obj.copy()
+        safe_df.index = safe_df.index.map(lambda x: x.isoformat() if isinstance(x, (pd.Timestamp, datetime)) else str(x))
+        records = safe_df.reset_index().to_dict(orient="records")
+        return clean_for_json(records)
+
     if isinstance(obj, pd.Series):
-        return obj.dropna().to_dict()
+        safe = obj.dropna()
+        return {
+            clean_for_json(k): clean_for_json(v)
+            for k, v in safe.to_dict().items()
+        }
+
+    # mappings / sequences
+    if isinstance(obj, dict):
+        return {str(clean_for_json(k)): clean_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [clean_for_json(v) for v in obj]
+
+    # numpy / pandas scalars
+    if isinstance(obj, np.ndarray):
+        return clean_for_json(obj.tolist())
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating, float)):
         v = float(obj)
         return None if not np.isfinite(v) else v
-    if isinstance(obj, (np.bool_,)):
+    if isinstance(obj, (np.bool_, bool)):
         return bool(obj)
+    if obj is pd.NA or obj is pd.NaT:
+        return None
+
+    # date/time-like values
     if isinstance(obj, (pd.Timestamp, datetime)):
         return obj.isoformat()
-    return obj
+    if hasattr(obj, "isoformat") and callable(getattr(obj, "isoformat")):
+        try:
+            return obj.isoformat()
+        except Exception:
+            pass
+
+    # bytes and unknown objects fallback
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+
+    try:
+        json.dumps(obj)
+        return obj
+    except TypeError:
+        return str(obj)
+
+
+def safe_json_dumps(obj):
+    return json.dumps(clean_for_json(obj), ensure_ascii=False, indent=2, allow_nan=False)
 
 # ----------------------------
 # Sidebar
@@ -419,7 +463,7 @@ with tab_data:
     st.json(clean_for_json(fund), expanded=False)
     st.markdown("#### Download")
     clean_result = clean_for_json(result)
-    st.download_button("下載 JSON", data=json.dumps(clean_result, ensure_ascii=False, indent=2), file_name="msft_buy_system_result.json", mime="application/json", use_container_width=True)
+    st.download_button("下載 JSON", data=safe_json_dumps(clean_result), file_name="msft_buy_system_result.json", mime="application/json", use_container_width=True)
     try:
         csv_df = pd.DataFrame([buy])
         st.download_button("下載 Buy Plan CSV", data=csv_df.to_csv(index=False).encode("utf-8-sig"), file_name="msft_buy_plan.csv", mime="text/csv", use_container_width=True)
